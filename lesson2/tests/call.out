@@ -1,0 +1,4 @@
+digraph main {
+  add5;
+  main;
+}
