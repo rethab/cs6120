@@ -1,9 +1,0 @@
-@main {
-  v: int = const 1;
-  c: bool = const false;
-  br c .there .here;
-.here:
-  v: int = const 10;
-.there:
-  print v;
-}
