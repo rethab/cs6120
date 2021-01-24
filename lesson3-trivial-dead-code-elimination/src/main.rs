@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::mem;
 
@@ -55,22 +56,25 @@ fn flatten_blocks(blocks: Vec<BasicBlock>) -> Vec<Code> {
 
 fn eliminate_dead_code(blocks: &mut Vec<BasicBlock>) {
     let mut remove = Vec::new();
-    let mut used = Vec::new();
+    let mut used = HashMap::new();
     for (block_idx, block) in blocks.iter().enumerate().rev() {
         for (instr_idx, instr) in block.instrs.iter().enumerate().rev() {
             match instr {
                 Instruction::Constant { dest, .. } => {
-                    if let Some(pos) = index_of(&used, dest) {
-                        used.remove(pos); // eliminates prev. declarations of dest
+                    if let Some(used_block_idx) = used.get(dest) {
+                        // if it is used in another block, we need to retain it
+                        if *used_block_idx == block_idx {
+                            used.remove(dest); // eliminates prev. declarations of dest
+                        }
                     } else {
                         remove.push((block_idx, instr_idx)); // never used, safely remove
                     }
                 }
                 Instruction::Value { dest, args, .. } => {
-                    if index_of(&used, dest).is_some() {
+                    if used.contains_key(dest) {
                         // dest is found, all args are used as well
                         for arg in args {
-                            used.push(arg.clone());
+                            used.insert(arg.clone(), block_idx);
                         }
                     } else {
                         // dest is not used
@@ -79,7 +83,7 @@ fn eliminate_dead_code(blocks: &mut Vec<BasicBlock>) {
                 }
                 Instruction::Effect { args, .. } => {
                     for arg in args {
-                        used.push(arg.clone());
+                        used.insert(arg.clone(), block_idx);
                     }
                 }
             }
@@ -91,11 +95,6 @@ fn eliminate_dead_code(blocks: &mut Vec<BasicBlock>) {
     for (block_idx, instr_idx) in remove {
         blocks[block_idx].instrs.remove(instr_idx);
     }
-}
-
-#[inline]
-fn index_of<T: PartialEq>(v: &[T], n: &T) -> Option<usize> {
-    v.iter().position(|x| x == n)
 }
 
 fn create_blocks(f: Function) -> Vec<BasicBlock> {
