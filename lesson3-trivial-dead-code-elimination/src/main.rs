@@ -32,9 +32,7 @@ fn main() -> io::Result<()> {
 
     for func in program.functions.iter_mut() {
         let mut blocks = create_blocks(func.clone());
-        for block in blocks.iter_mut() {
-            eliminate_dead_code(block)
-        }
+        eliminate_dead_code(&mut blocks);
         func.instrs = flatten_blocks(blocks);
     }
 
@@ -55,32 +53,34 @@ fn flatten_blocks(blocks: Vec<BasicBlock>) -> Vec<Code> {
     code
 }
 
-fn eliminate_dead_code(block: &mut BasicBlock) {
+fn eliminate_dead_code(blocks: &mut Vec<BasicBlock>) {
     let mut remove = Vec::new();
     let mut used = Vec::new();
-    for (idx, instr) in block.instrs.iter().enumerate().rev() {
-        match instr {
-            Instruction::Constant { dest, .. } => {
-                if let Some(pos) = index_of(&used, dest) {
-                    used.remove(pos); // eliminates prev. declarations of dest
-                } else {
-                    remove.push(idx); // never used, safely remove
+    for (block_idx, block) in blocks.iter().enumerate().rev() {
+        for (instr_idx, instr) in block.instrs.iter().enumerate().rev() {
+            match instr {
+                Instruction::Constant { dest, .. } => {
+                    if let Some(pos) = index_of(&used, dest) {
+                        used.remove(pos); // eliminates prev. declarations of dest
+                    } else {
+                        remove.push((block_idx, instr_idx)); // never used, safely remove
+                    }
                 }
-            }
-            Instruction::Value { dest, args, .. } => {
-                if index_of(&used, dest).is_some() {
-                    // dest is found, all args are used as well
+                Instruction::Value { dest, args, .. } => {
+                    if index_of(&used, dest).is_some() {
+                        // dest is found, all args are used as well
+                        for arg in args {
+                            used.push(arg.clone());
+                        }
+                    } else {
+                        // dest is not used
+                        remove.push((block_idx, instr_idx));
+                    }
+                }
+                Instruction::Effect { args, .. } => {
                     for arg in args {
                         used.push(arg.clone());
                     }
-                } else {
-                    // dest is not used
-                    remove.push(idx);
-                }
-            }
-            Instruction::Effect { args, .. } => {
-                for arg in args {
-                    used.push(arg.clone());
                 }
             }
         }
@@ -88,8 +88,8 @@ fn eliminate_dead_code(block: &mut BasicBlock) {
 
     // note that we need to remove elements with the biggest index first
     // this works because we iterate in reverse above
-    for idx in remove {
-        block.instrs.remove(idx);
+    for (block_idx, instr_idx) in remove {
+        blocks[block_idx].instrs.remove(instr_idx);
     }
 }
 
@@ -107,8 +107,7 @@ fn create_blocks(f: Function) -> Vec<BasicBlock> {
             Code::Instruction(instr) if !is_terminator(&instr) => current.push(instr),
             Code::Instruction(instr) => {
                 current.push(instr);
-                let new_label = format!("_l{}", blocks.len());
-                let next_block = BasicBlock::new(Some(new_label));
+                let next_block = BasicBlock::new(None);
                 blocks.push(mem::replace(&mut current, next_block))
             }
             Code::Label { label } if current.is_empty() => {
