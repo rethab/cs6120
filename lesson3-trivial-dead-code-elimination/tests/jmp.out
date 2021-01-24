@@ -1,0 +1,7 @@
+digraph main {
+  main;
+  _l0;
+  somewhere;
+  main -> somewhere;
+  _l0 -> somewhere;
+}
