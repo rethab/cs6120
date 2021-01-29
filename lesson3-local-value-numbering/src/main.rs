@@ -50,8 +50,9 @@ enum LvnValue {
     Op(ValueOps, Vec<usize>),
 }
 
+type LvnRow = (Vec<String>, usize, LvnValue, String);
 struct LvnCtx {
-    values: Vec<(Vec<String>, usize, LvnValue, String)>,
+    values: Vec<LvnRow>,
 }
 
 impl LvnCtx {
@@ -77,21 +78,14 @@ impl LvnCtx {
     }
 
     fn unresolve(&self, numbers: &[usize]) -> Vec<String> {
-        numbers
+        numbers.iter().map(|n| self.unrelsolve_number(*n).3).collect()
+    }
+
+    fn unrelsolve_number(&self, number: usize) -> &LvnRow {
+        self.values
             .iter()
-            .map(|n| {
-                self.values
-                    .iter()
-                    .find_map(|(_, number, _, variable)| {
-                        if n == number {
-                            Some(variable.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| panic!("Number {} not found", n))
-            })
-            .collect()
+            .find(|(_, n, _, )| n == number)
+            .unwrap_or_else(|| panic!("Number {} not found", n))
     }
 
     fn add_alias(&mut self, number: usize, instr: &Instruction) {
@@ -149,10 +143,21 @@ impl LvnCtx {
         }
     }
 
-    fn find(&self, mb_val: &Option<LvnValue>) -> Option<&(Vec<String>, usize, LvnValue, String)> {
-        mb_val
-            .as_ref()
-            .and_then(|val| self.values.iter().find(|(_, _, v, _)| v == val))
+    fn find(&self, mb_val: &Option<LvnValue>) -> Option<&LvnRow> {
+        if let Some(val) = mb_val {
+            if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
+                if let LvnValue::Op(ValueOps::Id, ns) = val {
+                    match self.unrelsolve_number(ns[0]).2 {
+                        LvnValue::Const(_) => {}
+                        LvnValue::Op(ValueOps::Id, ns2) => *ns = ns2;
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -164,6 +169,13 @@ impl Default for LvnCtx {
 
 fn local_value_numbering(block: &mut BasicBlock) {
     let mut ctx = LvnCtx::default();
+    /* x: int = const 4;
+     * copy1: int = id x;
+     * copy2: int = id copy1;
+     * copy3: int = id copy2;
+     * print copy3; */
+    /// when we come across an id that points to another id, we can just replace it with that
+    ///
     for instr in &mut block.instrs {
         let val = ctx.create_value(&instr);
         let new_instr = if let Some((_, number, _, var)) = ctx.find(&val).cloned() {
