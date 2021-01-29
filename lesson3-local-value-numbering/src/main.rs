@@ -44,61 +44,115 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, PartialEq)]
 enum LvnValue {
     Const(Literal),
     Op(ValueOps, Vec<usize>),
 }
 
 struct LvnCtx {
-    values: Vec<(String, usize, LvnValue, String)>,
+    values: Vec<(Vec<String>, usize, LvnValue, String)>,
 }
 
 impl LvnCtx {
-    /// Err means it already existed, Ok means it is new
-    fn upsert(&mut self, i: &mut Instruction) -> Result<String, String> {
-        match i {
-            Instruction::Constant { dest, value, .. } => {
-                let value = LvnValue::Const(value.clone());
-                if let Some((_, _, _, c)) = self.find(&value) {
-                    Err(c.clone())
-                } else {
-                    let idx = self.values.len();
-                    self.values.push((dest.clone(), idx, value, dest.clone()));
-                    Ok(dest.clone())
-                }
-            }
-            Instruction::Value { op, args, dest, .. } => {
-                // x: add a b
-                let value = self.value_op(op.clone(), args.clone());
-                if let Some((_, _, _, c)) = self.find(&value) {
-                    Err(c.clone())
-                } else {
-                    let idx = self.values.len();
-                    self.values.push((dest.clone(), idx, value, dest.clone()));
-                    Ok(dest.clone())
-                }
-            }
-            Instruction::Effect { .. } => unreachable!(),
+    fn create_value(&self, instr: &Instruction) -> Option<LvnValue> {
+        match instr {
+            Instruction::Constant { value, .. } => Some(LvnValue::Const(value.clone())),
+            Instruction::Value { op, args, .. } => Some(LvnValue::Op(*op, self.resolve(args))),
+            Instruction::Effect { .. } => None,
         }
     }
 
-    fn value_op(&self, op: ValueOps, args: Vec<String>) -> LvnValue {
-        let mut value_args = Vec::new();
-        args.iter().for_each(|a| value_args.push(self.resolve(a)));
-        LvnValue::Op(op, value_args)
+    fn resolve(&self, args: &[String]) -> Vec<usize> {
+        let mut numbers = Vec::with_capacity(args.len());
+        for arg in args {
+            let number = self
+                .values
+                .iter()
+                .find_map(|(vs, n, _, _)| if vs.contains(arg) { Some(*n) } else { None })
+                .unwrap_or_else(|| panic!("Variable {} not found!", arg));
+            numbers.push(number);
+        }
+        numbers
     }
 
-    fn find(&self, val: &LvnValue) -> Option<&(String, usize, LvnValue, String)> {
-        self.values.iter().find(|(_, v, _, _)| v == val)
-    }
-
-    fn resolve(&self, variable: &str) -> usize {
-        *self
-            .values
+    fn unresolve(&self, numbers: &[usize]) -> Vec<String> {
+        numbers
             .iter()
-            .find(|(v, _, _, _)| v == variable)
-            .map(|(_, n, _, _)| n)
-            .expect("Variable not found")
+            .map(|n| {
+                self.values
+                    .iter()
+                    .find_map(|(_, number, _, variable)| {
+                        if n == number {
+                            Some(variable.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| panic!("Number {} not found", n))
+            })
+            .collect()
+    }
+
+    fn add_alias(&mut self, number: usize, instr: &Instruction) {
+        if let Some((vs, _, _, _)) = self.values.iter_mut().find(|(_, n, _, _)| *n == number) {
+            match instr {
+                Instruction::Constant { dest, .. } => vs.push(dest.clone()),
+                Instruction::Value { dest, .. } => vs.push(dest.clone()),
+                Instruction::Effect { .. } => unreachable!(),
+            }
+        } else {
+            panic!("Number {} not found", number);
+        }
+    }
+
+    fn insert(&mut self, instr: &Instruction, mb_val: Option<LvnValue>) {
+        let dest: String = match instr {
+            Instruction::Constant { dest, .. } => dest.clone(),
+            Instruction::Value { dest, .. } => dest.clone(),
+            Instruction::Effect { .. } => return,
+        };
+        let val = if let Some(v) = mb_val { v } else { return };
+        let idx = self.values.len();
+        self.values.push((vec![dest.clone()], idx, val, dest));
+    }
+
+    fn reconstruct(&self, mb_val: Option<LvnValue>, instr: &Instruction) -> Instruction {
+        if let Some(val) = mb_val {
+            match instr {
+                Instruction::Constant { .. } => instr.clone(),
+                Instruction::Value {
+                    op,
+                    dest,
+                    op_type,
+                    funcs,
+                    labels,
+                    ..
+                } => match val {
+                    LvnValue::Const(_) => unreachable!(),
+                    LvnValue::Op(_, numbers) => {
+                        let args = self.unresolve(&numbers);
+                        Instruction::Value {
+                            op: *op,
+                            dest: dest.clone(),
+                            op_type: op_type.clone(),
+                            args,
+                            funcs: funcs.clone(),
+                            labels: labels.clone(),
+                        }
+                    }
+                },
+                Instruction::Effect { .. } => unreachable!(),
+            }
+        } else {
+            instr.clone()
+        }
+    }
+
+    fn find(&self, mb_val: &Option<LvnValue>) -> Option<&(Vec<String>, usize, LvnValue, String)> {
+        mb_val
+            .as_ref()
+            .and_then(|val| self.values.iter().find(|(_, _, v, _)| v == val))
     }
 }
 
@@ -108,7 +162,41 @@ impl Default for LvnCtx {
     }
 }
 
-fn local_value_numbering(block: &mut BasicBlock) {}
+fn local_value_numbering(block: &mut BasicBlock) {
+    let mut ctx = LvnCtx::default();
+    for instr in &mut block.instrs {
+        let val = ctx.create_value(&instr);
+        let new_instr = if let Some((_, number, _, var)) = ctx.find(&val).cloned() {
+            ctx.add_alias(number, &instr);
+            create_id(&instr, var)
+        } else {
+            ctx.insert(&instr, val.clone());
+            ctx.reconstruct(val, &instr)
+        };
+        *instr = new_instr;
+    }
+}
+
+fn create_id(instr: &Instruction, variable: String) -> Instruction {
+    match instr {
+        Instruction::Constant { .. } => unreachable!(),
+        Instruction::Value {
+            dest,
+            op_type,
+            funcs,
+            labels,
+            ..
+        } => Instruction::Value {
+            op: ValueOps::Id,
+            dest: dest.clone(),
+            op_type: op_type.clone(),
+            args: vec![variable],
+            funcs: funcs.clone(),
+            labels: labels.clone(),
+        },
+        Instruction::Effect { .. } => unreachable!(),
+    }
+}
 
 fn flatten_blocks(blocks: Vec<BasicBlock>) -> Vec<Code> {
     let mut code = Vec::new();
