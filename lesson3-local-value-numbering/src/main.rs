@@ -152,9 +152,14 @@ impl LvnCtx {
         } else {
             return None;
         };
+        // x:     int = const 4
+        // copy1: int = id x
+        // copy2: int = id copy1
+        // copy3: int = id copy2
+        // print copy3
         if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
             Some(x.clone())
-        } else if let LvnValue::Op(ValueOps::Id, ns) = val {
+        } else if let LvnValue::Op(_, ns) = val {
             // copy propagation if an id points to another id
             let mut other_val = self.unrelsolve_number(ns[0]).clone();
             if let LvnValue::Op(ValueOps::Id, original_ns) = &other_val.2 {
