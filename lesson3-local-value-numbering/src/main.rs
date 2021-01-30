@@ -47,7 +47,8 @@ fn main() -> io::Result<()> {
 #[derive(Clone, PartialEq, Debug)]
 enum LvnValue {
     Const(Literal),
-    Op(ValueOps, Vec<usize>),
+    Value(ValueOps, Vec<usize>),
+    Effect(EffectOps, Vec<usize>),
 }
 
 type LvnRow = (Vec<String>, usize, LvnValue, String);
@@ -56,11 +57,11 @@ struct LvnCtx {
 }
 
 impl LvnCtx {
-    fn create_value(&self, instr: &Instruction) -> Option<LvnValue> {
+    fn create_value(&self, instr: &Instruction) -> LvnValue {
         match instr {
-            Instruction::Constant { value, .. } => Some(LvnValue::Const(value.clone())),
-            Instruction::Value { op, args, .. } => Some(LvnValue::Op(*op, self.resolve(args))),
-            Instruction::Effect { .. } => None,
+            Instruction::Constant { value, .. } => LvnValue::Const(value.clone()),
+            Instruction::Value { op, args, .. } => LvnValue::Value(*op, self.resolve(args)),
+            Instruction::Effect { op, args, .. } => LvnValue::Effect(*op, self.resolve(args)),
         }
     }
 
@@ -80,15 +81,30 @@ impl LvnCtx {
     fn unresolve(&self, numbers: &[usize]) -> Vec<String> {
         numbers
             .iter()
-            .map(|n| self.unrelsolve_number(*n).3.clone())
+            .map(|n| self.unresolve_number(*n).3.clone())
             .collect()
     }
 
-    fn unrelsolve_number(&self, number: usize) -> &LvnRow {
+    fn unresolve_number(&self, number: usize) -> &LvnRow {
         self.values
             .iter()
             .find(|(_, n, _, _)| *n == number)
+            .map(|row| {
+                if let Some(orig_row) = self.resolve_id(&row.2) {
+                    orig_row
+                } else {
+                    row
+                }
+            })
             .unwrap_or_else(|| panic!("Number {} not found", number))
+    }
+
+    fn resolve_id(&self, value: &LvnValue) -> Option<&LvnRow> {
+        if let LvnValue::Value(ValueOps::Id, ns) = value {
+            Some(self.unresolve_number(ns[0]))
+        } else {
+            None
+        }
     }
 
     fn add_alias(&mut self, number: usize, instr: &Instruction) {
@@ -103,55 +119,60 @@ impl LvnCtx {
         }
     }
 
-    fn insert(&mut self, instr: &Instruction, mb_val: Option<LvnValue>) {
+    fn insert(&mut self, instr: &Instruction, val: LvnValue) {
         let dest: String = match instr {
             Instruction::Constant { dest, .. } => dest.clone(),
             Instruction::Value { dest, .. } => dest.clone(),
             Instruction::Effect { .. } => return,
         };
-        let val = if let Some(v) = mb_val { v } else { return };
         let idx = self.values.len();
         self.values.push((vec![dest.clone()], idx, val, dest));
     }
 
-    fn reconstruct(&self, mb_val: Option<LvnValue>, instr: &Instruction) -> Instruction {
-        if let Some(val) = mb_val {
-            match instr {
-                Instruction::Constant { .. } => instr.clone(),
-                Instruction::Value {
-                    op,
-                    dest,
-                    op_type,
-                    funcs,
-                    labels,
-                    ..
-                } => match val {
-                    LvnValue::Const(_) => unreachable!(),
-                    LvnValue::Op(_, numbers) => {
-                        let args = self.unresolve(&numbers);
-                        Instruction::Value {
-                            op: *op,
-                            dest: dest.clone(),
-                            op_type: op_type.clone(),
-                            args,
-                            funcs: funcs.clone(),
-                            labels: labels.clone(),
-                        }
+    fn reconstruct(&self, val: LvnValue, instr: &Instruction) -> Instruction {
+        match instr {
+            Instruction::Constant { .. } => instr.clone(),
+            Instruction::Value {
+                op,
+                dest,
+                op_type,
+                funcs,
+                labels,
+                ..
+            } => match val {
+                LvnValue::Const(_) => unreachable!(),
+                LvnValue::Effect(_, _) => unreachable!(),
+                LvnValue::Value(_, numbers) => {
+                    let args = self.unresolve(&numbers);
+                    Instruction::Value {
+                        op: *op,
+                        dest: dest.clone(),
+                        op_type: op_type.clone(),
+                        args,
+                        funcs: funcs.clone(),
+                        labels: labels.clone(),
                     }
-                },
-                Instruction::Effect { .. } => unreachable!(),
-            }
-        } else {
-            instr.clone()
+                }
+            },
+            Instruction::Effect {
+                op, funcs, labels, ..
+            } => match val {
+                LvnValue::Const(_) => unreachable!(),
+                LvnValue::Value(_, _) => unreachable!(),
+                LvnValue::Effect(_, numbers) => {
+                    let args = self.unresolve(&numbers);
+                    Instruction::Effect {
+                        op: *op,
+                        args,
+                        funcs: funcs.clone(),
+                        labels: labels.clone(),
+                    }
+                }
+            },
         }
     }
 
-    fn find(&self, mb_val: &Option<LvnValue>) -> Option<LvnRow> {
-        let val = if let Some(val) = mb_val {
-            val
-        } else {
-            return None;
-        };
+    fn find(&self, val: &LvnValue) -> Option<LvnRow> {
         // x:     int = const 4
         // copy1: int = id x
         // copy2: int = id copy1
@@ -159,10 +180,10 @@ impl LvnCtx {
         // print copy3
         if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
             Some(x.clone())
-        } else if let LvnValue::Op(_, ns) = val {
+        } else if let LvnValue::Value(_, ns) = val {
             // copy propagation if an id points to another id
-            let mut other_val = self.unrelsolve_number(ns[0]).clone();
-            if let LvnValue::Op(ValueOps::Id, original_ns) = &other_val.2 {
+            let mut other_val = self.unresolve_number(ns[0]).clone();
+            if let LvnValue::Value(ValueOps::Id, original_ns) = &other_val.2 {
                 let mut original_args = self.unresolve(original_ns);
                 other_val.3 = original_args.remove(0);
                 Some(other_val)
