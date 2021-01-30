@@ -44,7 +44,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum LvnValue {
     Const(Literal),
     Op(ValueOps, Vec<usize>),
@@ -78,14 +78,17 @@ impl LvnCtx {
     }
 
     fn unresolve(&self, numbers: &[usize]) -> Vec<String> {
-        numbers.iter().map(|n| self.unrelsolve_number(*n).3).collect()
+        numbers
+            .iter()
+            .map(|n| self.unrelsolve_number(*n).3.clone())
+            .collect()
     }
 
     fn unrelsolve_number(&self, number: usize) -> &LvnRow {
         self.values
             .iter()
-            .find(|(_, n, _, )| n == number)
-            .unwrap_or_else(|| panic!("Number {} not found", n))
+            .find(|(_, n, _, _)| *n == number)
+            .unwrap_or_else(|| panic!("Number {} not found", number))
     }
 
     fn add_alias(&mut self, number: usize, instr: &Instruction) {
@@ -143,15 +146,21 @@ impl LvnCtx {
         }
     }
 
-    fn find(&self, mb_val: &Option<LvnValue>) -> Option<&LvnRow> {
-        if let Some(val) = mb_val {
-            if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
-                if let LvnValue::Op(ValueOps::Id, ns) = val {
-                    match self.unrelsolve_number(ns[0]).2 {
-                        LvnValue::Const(_) => {}
-                        LvnValue::Op(ValueOps::Id, ns2) => *ns = ns2;
-                    }
-                }
+    fn find(&self, mb_val: &Option<LvnValue>) -> Option<LvnRow> {
+        let val = if let Some(val) = mb_val {
+            val
+        } else {
+            return None;
+        };
+        if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
+            Some(x.clone())
+        } else if let LvnValue::Op(ValueOps::Id, ns) = val {
+            // copy propagation if an id points to another id
+            let mut other_val = self.unrelsolve_number(ns[0]).clone();
+            if let LvnValue::Op(ValueOps::Id, original_ns) = &other_val.2 {
+                let mut original_args = self.unresolve(original_ns);
+                other_val.3 = original_args.remove(0);
+                Some(other_val)
             } else {
                 None
             }
@@ -174,11 +183,9 @@ fn local_value_numbering(block: &mut BasicBlock) {
      * copy2: int = id copy1;
      * copy3: int = id copy2;
      * print copy3; */
-    /// when we come across an id that points to another id, we can just replace it with that
-    ///
     for instr in &mut block.instrs {
         let val = ctx.create_value(&instr);
-        let new_instr = if let Some((_, number, _, var)) = ctx.find(&val).cloned() {
+        let new_instr = if let Some((_, number, _, var)) = ctx.find(&val) {
             ctx.add_alias(number, &instr);
             create_id(&instr, var)
         } else {
