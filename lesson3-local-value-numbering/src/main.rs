@@ -173,26 +173,7 @@ impl LvnCtx {
     }
 
     fn find(&self, val: &LvnValue) -> Option<LvnRow> {
-        // x:     int = const 4
-        // copy1: int = id x
-        // copy2: int = id copy1
-        // copy3: int = id copy2
-        // print copy3
-        if let Some(x) = self.values.iter().find(|(_, _, v, _)| v == val) {
-            Some(x.clone())
-        } else if let LvnValue::Value(_, ns) = val {
-            // copy propagation if an id points to another id
-            let mut other_val = self.unresolve_number(ns[0]).clone();
-            if let LvnValue::Value(ValueOps::Id, original_ns) = &other_val.2 {
-                let mut original_args = self.unresolve(original_ns);
-                other_val.3 = original_args.remove(0);
-                Some(other_val)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.values.iter().find(|(_, _, v, _)| v == val).cloned()
     }
 }
 
