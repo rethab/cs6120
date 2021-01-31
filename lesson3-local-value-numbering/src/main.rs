@@ -51,6 +51,26 @@ enum LvnValue {
     Effect(EffectOps, Vec<usize>),
 }
 
+impl LvnValue {
+    fn canonicalize(self) -> Self {
+        match self {
+            c @ LvnValue::Const(_) => c,
+            e @ LvnValue::Effect(_, _) => e,
+            LvnValue::Value(op, mut args) => {
+                if LvnValue::is_commutative(&op) {
+                    args.sort();
+                }
+                LvnValue::Value(op, args)
+            }
+        }
+    }
+
+    fn is_commutative(op: &ValueOps) -> bool {
+        use ValueOps::*;
+        matches!(op, Add | Mul | And | Eq | Or | Fadd | Fmul | Feq)
+    }
+}
+
 type LvnRow = (Vec<String>, usize, LvnValue, String);
 struct LvnCtx {
     values: Vec<LvnRow>,
@@ -126,7 +146,8 @@ impl LvnCtx {
             Instruction::Effect { .. } => return,
         };
         let idx = self.values.len();
-        self.values.push((vec![dest.clone()], idx, val, dest));
+        self.values
+            .push((vec![dest.clone()], idx, val.canonicalize(), dest));
     }
 
     fn reconstruct(&self, val: LvnValue, instr: &Instruction) -> Instruction {
@@ -173,7 +194,11 @@ impl LvnCtx {
     }
 
     fn find(&self, val: &LvnValue) -> Option<LvnRow> {
-        self.values.iter().find(|(_, _, v, _)| v == val).cloned()
+        let canon_val = val.clone().canonicalize();
+        self.values
+            .iter()
+            .find(|(_, _, v, _)| *v == canon_val)
+            .cloned()
     }
 }
 
