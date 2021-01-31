@@ -105,6 +105,10 @@ impl LvnCtx {
             .collect()
     }
 
+    fn unresolve_numbers(&self, numbers: &[usize]) -> Vec<&LvnRow> {
+        numbers.iter().map(|n| self.unresolve_number(*n)).collect()
+    }
+
     fn unresolve_number(&self, number: usize) -> &LvnRow {
         self.values
             .iter()
@@ -160,21 +164,7 @@ impl LvnCtx {
                 funcs,
                 labels,
                 ..
-            } => match val {
-                LvnValue::Const(_) => unreachable!(),
-                LvnValue::Effect(_, _) => unreachable!(),
-                LvnValue::Value(_, numbers) => {
-                    let args = self.unresolve(&numbers);
-                    Instruction::Value {
-                        op: *op,
-                        dest: dest.clone(),
-                        op_type: op_type.clone(),
-                        args,
-                        funcs: funcs.clone(),
-                        labels: labels.clone(),
-                    }
-                }
-            },
+            } => self.reconstruct_value(val, op, dest, op_type, funcs, labels),
             Instruction::Effect {
                 op, funcs, labels, ..
             } => match val {
@@ -190,6 +180,117 @@ impl LvnCtx {
                     }
                 }
             },
+        }
+    }
+
+    fn reconstruct_value(
+        &self,
+        val: LvnValue,
+        op: &ValueOps,
+        dest: &str,
+        op_type: &Type,
+        funcs: &[String],
+        labels: &[String],
+    ) -> Instruction {
+        use ValueOps::*;
+        let numbers = if let LvnValue::Value(_, numbers) = val {
+            numbers
+        } else {
+            unreachable!()
+        };
+        let rows_of_args = self.unresolve_numbers(&numbers);
+        match op {
+            Add => {
+                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a + b, dest, op_type)
+                {
+                    return instr;
+                }
+            }
+            Sub => {
+                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a - b, dest, op_type)
+                {
+                    return instr;
+                }
+            }
+            Mul => {
+                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a * b, dest, op_type)
+                {
+                    return instr;
+                }
+            }
+            Div => {
+                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a / b, dest, op_type)
+                {
+                    return instr;
+                }
+            }
+            Id => {
+                if let Some(value) = LvnCtx::one_constant(&rows_of_args) {
+                    return Instruction::Constant {
+                        op: ConstOps::Const,
+                        dest: dest.to_owned(),
+                        const_type: op_type.clone(),
+                        value,
+                    };
+                }
+            }
+            other => unimplemented!("not supported: {:?}", other),
+        };
+        let args = self.unresolve(&numbers);
+        Instruction::Value {
+            op: *op,
+            dest: dest.to_owned(),
+            op_type: op_type.clone(),
+            args,
+            funcs: funcs.to_vec(),
+            labels: labels.to_vec(),
+        }
+    }
+
+    fn binary_int<F>(
+        rows_of_args: &[&LvnRow],
+        fun: F,
+        dest: &str,
+        const_type: &Type,
+    ) -> Option<Instruction>
+    where
+        F: FnOnce(i64, i64) -> i64,
+    {
+        LvnCtx::two_constants(&rows_of_args).map(|(a, b)| {
+            int_constant(
+                dest.to_owned(),
+                const_type.clone(),
+                fun(LvnCtx::force_int(a), LvnCtx::force_int(b)),
+            )
+        })
+    }
+
+    fn two_constants(rows_of_args: &[&LvnRow]) -> Option<(Literal, Literal)> {
+        if rows_of_args.len() == 2 {
+            LvnCtx::one_constant(&rows_of_args[0..1])
+                .and_then(|a| LvnCtx::one_constant(&rows_of_args[1..2]).map(|b| (a, b)))
+        } else {
+            panic!("Expected two values in {:?}", rows_of_args);
+        }
+    }
+
+    fn one_constant(rows_of_args: &[&LvnRow]) -> Option<Literal> {
+        if rows_of_args.len() == 1 {
+            if let LvnValue::Const(l) = &rows_of_args[0].2 {
+                Some(l.clone())
+            } else {
+                None
+            }
+        } else {
+            panic!("Expected one value in {:?}", rows_of_args);
+        }
+    }
+
+    fn force_int(l: Literal) -> i64 {
+        if let Literal::Int(i) = l {
+            i
+        } else {
+            panic!("Expected int, but was {:?}", l)
         }
     }
 
@@ -246,6 +347,15 @@ fn create_id(instr: &Instruction, variable: String) -> Instruction {
             labels: labels.clone(),
         },
         Instruction::Effect { .. } => unreachable!(),
+    }
+}
+
+fn int_constant(dest: String, const_type: Type, v: i64) -> Instruction {
+    Instruction::Constant {
+        op: ConstOps::Const,
+        dest,
+        const_type,
+        value: Literal::Int(v),
     }
 }
 
