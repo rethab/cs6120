@@ -58,7 +58,7 @@ impl LvnValue {
             e @ LvnValue::Effect(_, _) => e,
             LvnValue::Value(op, mut args) => {
                 if LvnValue::is_commutative(&op) {
-                    args.sort();
+                    args.sort_unstable();
                 }
                 LvnValue::Value(op, args)
             }
@@ -155,8 +155,23 @@ impl LvnCtx {
     }
 
     fn reconstruct(&self, val: LvnValue, instr: &Instruction) -> Instruction {
+        if let LvnValue::Const(lit) = val {
+            return match instr {
+                i @ Instruction::Constant { .. } => i.clone(),
+                Instruction::Value { dest, op_type, .. } => Instruction::Constant {
+                    op: ConstOps::Const,
+                    dest: dest.clone(),
+                    const_type: op_type.clone(),
+                    value: lit,
+                },
+                Instruction::Effect { .. } => panic!("An effect cannot be constant-folded"),
+            };
+        }
+
         match instr {
-            Instruction::Constant { .. } => instr.clone(),
+            Instruction::Constant { .. } => {
+                panic!("Cannot reconstruct constant instruction if lvn value was not a constant")
+            }
             Instruction::Value {
                 op,
                 dest,
@@ -183,6 +198,46 @@ impl LvnCtx {
         }
     }
 
+    fn fold_constants(&self, val: LvnValue) -> LvnValue {
+        use ValueOps::*;
+        let (op, numbers) = if let LvnValue::Value(op, numbers) = val.clone() {
+            (op, numbers)
+        } else {
+            return val;
+        };
+
+        let rows_of_args = self.unresolve_numbers(&numbers);
+        match op {
+            Add => {
+                if let Some(val) = LvnCtx::binary_int(&rows_of_args, |a, b| a + b) {
+                    return val;
+                }
+            }
+            Sub => {
+                if let Some(val) = LvnCtx::binary_int(&rows_of_args, |a, b| a - b) {
+                    return val;
+                }
+            }
+            Mul => {
+                if let Some(val) = LvnCtx::binary_int(&rows_of_args, |a, b| a * b) {
+                    return val;
+                }
+            }
+            Div => {
+                if let Some(val) = LvnCtx::binary_int(&rows_of_args, |a, b| a / b) {
+                    return val;
+                }
+            }
+            Id => {
+                if let Some(lit) = LvnCtx::one_constant(&rows_of_args) {
+                    return LvnValue::Const(lit);
+                }
+            }
+            other => unimplemented!("not supported: {:?}", other),
+        };
+        val
+    }
+
     fn reconstruct_value(
         &self,
         val: LvnValue,
@@ -192,49 +247,10 @@ impl LvnCtx {
         funcs: &[String],
         labels: &[String],
     ) -> Instruction {
-        use ValueOps::*;
         let numbers = if let LvnValue::Value(_, numbers) = val {
             numbers
         } else {
-            unreachable!()
-        };
-        let rows_of_args = self.unresolve_numbers(&numbers);
-        match op {
-            Add => {
-                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a + b, dest, op_type)
-                {
-                    return instr;
-                }
-            }
-            Sub => {
-                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a - b, dest, op_type)
-                {
-                    return instr;
-                }
-            }
-            Mul => {
-                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a * b, dest, op_type)
-                {
-                    return instr;
-                }
-            }
-            Div => {
-                if let Some(instr) = LvnCtx::binary_int(&rows_of_args, |a, b| a / b, dest, op_type)
-                {
-                    return instr;
-                }
-            }
-            Id => {
-                if let Some(value) = LvnCtx::one_constant(&rows_of_args) {
-                    return Instruction::Constant {
-                        op: ConstOps::Const,
-                        dest: dest.to_owned(),
-                        const_type: op_type.clone(),
-                        value,
-                    };
-                }
-            }
-            other => unimplemented!("not supported: {:?}", other),
+            panic!("Cannot reconstruct {:?} based on {:?}", op, val);
         };
         let args = self.unresolve(&numbers);
         Instruction::Value {
@@ -247,21 +263,15 @@ impl LvnCtx {
         }
     }
 
-    fn binary_int<F>(
-        rows_of_args: &[&LvnRow],
-        fun: F,
-        dest: &str,
-        const_type: &Type,
-    ) -> Option<Instruction>
+    fn binary_int<F>(rows_of_args: &[&LvnRow], fun: F) -> Option<LvnValue>
     where
         F: FnOnce(i64, i64) -> i64,
     {
         LvnCtx::two_constants(&rows_of_args).map(|(a, b)| {
-            int_constant(
-                dest.to_owned(),
-                const_type.clone(),
-                fun(LvnCtx::force_int(a), LvnCtx::force_int(b)),
-            )
+            LvnValue::Const(Literal::Int(fun(
+                LvnCtx::force_int(a),
+                LvnCtx::force_int(b),
+            )))
         })
     }
 
@@ -317,11 +327,12 @@ fn local_value_numbering(block: &mut BasicBlock) {
      * copy3: int = id copy2;
      * print copy3; */
     for instr in &mut block.instrs {
-        let val = ctx.create_value(&instr);
+        let mut val = ctx.create_value(&instr);
         let new_instr = if let Some((_, number, _, var)) = ctx.find(&val) {
             ctx.add_alias(number, &instr);
             create_id(&instr, var)
         } else {
+            val = ctx.fold_constants(val);
             ctx.insert(&instr, val.clone());
             ctx.reconstruct(val, &instr)
         };
@@ -331,7 +342,7 @@ fn local_value_numbering(block: &mut BasicBlock) {
 
 fn create_id(instr: &Instruction, variable: String) -> Instruction {
     match instr {
-        Instruction::Constant { .. } => unreachable!(),
+        Instruction::Constant { .. } => instr.clone(),
         Instruction::Value {
             dest,
             op_type,
@@ -347,15 +358,6 @@ fn create_id(instr: &Instruction, variable: String) -> Instruction {
             labels: labels.clone(),
         },
         Instruction::Effect { .. } => unreachable!(),
-    }
-}
-
-fn int_constant(dest: String, const_type: Type, v: i64) -> Instruction {
-    Instruction::Constant {
-        op: ConstOps::Const,
-        dest,
-        const_type,
-        value: Literal::Int(v),
     }
 }
 

@@ -1,7 +1,4 @@
 @main {
-  a: int = const 1;
-  b: int = const 2;
-  c: int = add a b;
-  e: int = mul c c;
+  e: int = const 9;
   print e;
 }

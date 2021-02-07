@@ -1,4 +1,4 @@
 @main {
-  x: int = const 4;
-  print x;
+  copy3: int = const 4;
+  print copy3;
 }
