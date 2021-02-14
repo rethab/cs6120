@@ -62,26 +62,6 @@ impl BasicBlock {
     }
 }
 
-impl fmt::Display for BasicBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, ".{}:", self.label.as_ref().expect("missing label"))?;
-        write!(f, "IN: ")?;
-        for i in self.inc.iter() {
-            write!(f, " {}", i)?;
-        }
-        writeln!(f, "")?;
-        for instr in self.instrs.iter() {
-            writeln!(f, "  {}", instr)?;
-        }
-        write!(f, "OUT: ")?;
-        for o in self.out.iter() {
-            write!(f, " {}", o)?;
-        }
-        writeln!(f, "")?;
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 struct Cfg {
     edges: HashMap<String, Vec<String>>,
@@ -181,9 +161,7 @@ impl fmt::Display for Cfg {
                 write!(f, " {}", i)?;
             }
             writeln!(f, "")?;
-            for instr in block.instrs.iter() {
-                writeln!(f, "  {}", instr)?;
-            }
+            fmt_instrs(f, &block.instrs, &block.inc)?;
             write!(f, "  OUT:")?;
             for o in block.out.iter() {
                 write!(f, " {}", o)?;
@@ -192,6 +170,35 @@ impl fmt::Display for Cfg {
         }
         Ok(())
     }
+}
+
+fn fmt_instrs(
+    f: &mut fmt::Formatter<'_>,
+    instrs: &[Instruction],
+    ins: &HashSet<String>,
+) -> fmt::Result {
+    let mut defs = ins.clone();
+    for instr in instrs.iter() {
+        writeln!(f, "  {}", instr)?;
+
+        let (maybe_dest, maybe_args) = match instr {
+            Instruction::Constant { dest, .. } => (Some(dest), None),
+            Instruction::Value { dest, args, .. } => (Some(dest), Some(args)),
+            Instruction::Effect { args, .. } => (None, Some(args)),
+        };
+
+        if let Some(args) = maybe_args {
+            for arg in args {
+                if !defs.contains(arg) {
+                    writeln!(f, "ERROR: {} is not initialized", arg)?;
+                }
+            }
+        }
+        if let Some(dest) = maybe_dest {
+            defs.insert(dest.clone());
+        }
+    }
+    Ok(())
 }
 
 fn create_blocks(f: Function) -> Vec<BasicBlock> {
@@ -291,10 +298,13 @@ fn worklist(cfg: &mut Cfg, args: HashSet<String>) {
     }
 }
 
-fn merge(outs: Vec<HashSet<String>>) -> HashSet<String> {
-    let mut res = HashSet::new();
+fn merge(mut outs: Vec<HashSet<String>>) -> HashSet<String> {
+    if outs.is_empty() {
+        return HashSet::new();
+    }
+    let mut res = outs.pop().expect("No args to merge");
     for out in outs.iter() {
-        res = res.union(out).cloned().collect();
+        res = res.intersection(out).cloned().collect();
     }
     res
 }

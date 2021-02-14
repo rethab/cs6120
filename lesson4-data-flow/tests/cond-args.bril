@@ -8,7 +8,6 @@
   jmp .end;
 .right:
   a: int = const 2;
-  c: int = const 10;
   jmp .end;
 .end:
   d: int = sub a c;
