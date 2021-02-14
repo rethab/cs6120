@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::mem;
 
@@ -24,6 +26,54 @@ impl BasicBlock {
     fn is_empty(&self) -> bool {
         let madeup_label = self.label.as_ref().map(|l| l.starts_with("_l")) == Some(true);
         self.instrs.is_empty() && (self.label.is_none() || madeup_label)
+    }
+}
+
+impl fmt::Display for BasicBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, ".{}:", self.label.as_ref().expect("missing label"))?;
+        for instr in self.instrs.iter() {
+            writeln!(f, "  {}", instr)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Cfg {
+    edges: HashMap<String, Vec<String>>,
+    blocks: Vec<BasicBlock>,
+}
+
+impl Cfg {
+    fn push_edge(&mut self, label: String, successors: Vec<String>) {
+        self.edges.insert(label, successors);
+        ()
+    }
+
+    fn set_blocks(&mut self, blocks: Vec<BasicBlock>) {
+        self.blocks = blocks;
+    }
+}
+
+impl Default for Cfg {
+    fn default() -> Self {
+        Self {
+            edges: HashMap::new(),
+            blocks: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for Cfg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for block in self.blocks.iter() {
+            writeln!(f, ".{}:", block.label.as_ref().expect("Missing label"))?;
+            for instr in block.instrs.iter() {
+                writeln!(f, "  {}", instr)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -70,12 +120,9 @@ fn is_terminator_op(op: &EffectOps) -> bool {
     matches!(op, Jump | Branch | Return)
 }
 
-type Cfg = Vec<(String, Vec<String>)>;
-
 fn create_cfg(blocks: Vec<BasicBlock>) -> Cfg {
-    use EffectOps::*;
     use Instruction::*;
-    let mut edges: Cfg = Vec::new();
+    let mut cfg: Cfg = Cfg::default();
 
     let n_blocks = blocks.len();
     for i in 0..n_blocks {
@@ -88,10 +135,14 @@ fn create_cfg(blocks: Vec<BasicBlock>) -> Cfg {
 
         let successors = match last {
             Effect {
-                op: Jump, labels, ..
+                op: EffectOps::Jump,
+                labels,
+                ..
             } => labels.clone(),
             Effect {
-                op: Branch, labels, ..
+                op: EffectOps::Branch,
+                labels,
+                ..
             } => labels.to_vec(),
             Effect { op, labels, .. } if is_terminator_op(op) => labels.clone(),
             _ if i < n_blocks - 1 => {
@@ -101,22 +152,10 @@ fn create_cfg(blocks: Vec<BasicBlock>) -> Cfg {
             _ => vec![],
         };
 
-        edges.push((label, successors))
+        cfg.push_edge(label, successors)
     }
-    edges
-}
-
-fn flatten_blocks(blocks: Vec<BasicBlock>) -> Vec<Code> {
-    let mut code = Vec::new();
-    for block in blocks {
-        if let Some(label) = block.label {
-            code.push(Code::Label { label });
-        }
-        for instr in block.instrs {
-            code.push(Code::Instruction(instr))
-        }
-    }
-    code
+    cfg.set_blocks(blocks);
+    cfg
 }
 
 fn main() -> io::Result<()> {
@@ -125,7 +164,7 @@ fn main() -> io::Result<()> {
     for func in program.functions {
         let blocks = create_blocks(func.clone());
         let cfg = create_cfg(blocks);
-        println!("Cfg: {:?}", cfg);
+        println!("{}", cfg);
     }
 
     Ok(())
